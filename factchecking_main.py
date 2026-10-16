@@ -1,1 +1,155 @@
-{"nbformat":4,"nbformat_minor":0,"metadata":{"colab":{"provenance":[],"authorship_tag":"ABX9TyPUvdhOUDp2wYgTtRfvca8T"},"kernelspec":{"name":"python3","display_name":"Python 3"},"language_info":{"name":"python"}},"cells":[{"cell_type":"code","execution_count":null,"metadata":{"id":"polz2NiLrK9M"},"outputs":[],"source":["# factscore_retrieval_interface.py\n","\n","import json\n","from transformers import AutoTokenizer, AutoModelForSequenceClassification\n","from typing import List, Dict\n","from tqdm import tqdm\n","import argparse\n","from factcheck import *\n","\n","\n","def _parse_args():\n","    parser = argparse.ArgumentParser()\n","    parser.add_argument('--mode', type=str, required=True, help=\"choose from [random', 'always_entail', 'word_overlap', 'parsing', 'entailment]\")\n","    # parser.add_argument('--labels_path', type=str, default=\"data/labeled_ChatGPT.jsonl\", help=\"path to the labels\")\n","    parser.add_argument('--labels_path', type=str, default=\"data/dev_labeled_ChatGPT.jsonl\", help=\"path to the labels\")\n","    parser.add_argument('--passages_path', type=str, default=\"data/passages_bm25_ChatGPT_humfacts.jsonl\", help=\"path to the passages retrieved for the ChatGPT human-labeled facts\")\n","    parser.add_argument('--cuda', dest='cuda', default=False, action='store_true', help='skip printing output on the test set')\n","    args = parser.parse_args()\n","    return args\n","\n","\n","def read_passages(path: str):\n","    \"\"\"\n","    Reads the retrieved passages and puts then in a dictionary mapping facts to passages.\n","    :param path: path to the cached passages\n","    :return: dict mapping facts (strings) to passages\n","    \"\"\"\n","    fact_to_passage_dict = {}\n","    with open(path, 'r') as file:\n","        all_lines = file.readlines()\n","        for nextline in all_lines:\n","            dict = json.loads(nextline)\n","            name = dict[\"name\"]\n","            for passage in dict[\"passages\"]:\n","                if passage[\"title\"] != name:\n","                    raise Exception(\"Couldn't find a match for: \" + name + \" \" + passage[\"title\"])\n","            fact_to_passage_dict[dict[\"sent\"]] = dict[\"passages\"]\n","    return fact_to_passage_dict\n","\n","\n","def read_fact_examples(labeled_facts_path: str, fact_to_passage_dict: Dict):\n","    \"\"\"\n","    Reads the labeled fact examples and constructs FactExample objects associating labeled, human-annotated facts\n","    with their corresponding passages\n","    :param labeled_facts_path: path to the list of labeled\n","    :param fact_to_passage_dict: the dict mapping facts to passages (see load_passages)\n","    :return: a list of FactExample objects to use as our dataset\n","    \"\"\"\n","    examples = []\n","    with open(labeled_facts_path, 'r') as file:\n","        all_lines = file.readlines()\n","        for nextline in all_lines:\n","            dict = json.loads(nextline)\n","            if dict[\"annotations\"] is not None:\n","                for sent in dict[\"annotations\"]:\n","                    if sent[\"human-atomic-facts\"] is None:\n","                        # Should never be the case, but just in case\n","                        print(\"No facts! Skipping this one: \" + repr(sent))\n","                    else:\n","                        for fact in sent[\"human-atomic-facts\"]:\n","                            if fact[\"text\"] not in fact_to_passage_dict:\n","                                # Should never be the case, but just in case\n","                                print(\"Missing fact: \" + fact[\"text\"])\n","                            else:\n","                                examples.append(FactExample(fact[\"text\"], fact_to_passage_dict[fact[\"text\"]], fact[\"label\"]))\n","    return examples\n","\n","\n","def predict_two_classes(examples: List[FactExample], fact_checker):\n","    \"\"\"\n","    Compares against ground truth which is just the labels S and NS (IR is mapped to NS).\n","    Makes predictions and prints evaluation statistics on this setting.\n","    :param examples: a list of FactExample objects\n","    :param fact_checker: the FactChecker object to use for prediction\n","    \"\"\"\n","    gold_label_indexer = [\"S\", \"NS\"]\n","    confusion_mat = [[0, 0], [0, 0]]\n","    ex_count = 0\n","\n","    for i, example in enumerate(tqdm(examples)):\n","        converted_label = \"NS\" if example.label == 'IR' else example.label\n","        gold_label = gold_label_indexer.index(converted_label)\n","\n","        raw_pred = fact_checker.predict(example.fact, example.passages)\n","        pred_label = gold_label_indexer.index(raw_pred)\n","\n","        confusion_mat[gold_label][pred_label] += 1\n","        ex_count += 1\n","    print_eval_stats(confusion_mat, gold_label_indexer)\n","\n","\n","def print_eval_stats(confusion_mat, gold_label_indexer):\n","    \"\"\"\n","    Takes a confusion matrix and the label indexer and prints accuracy and per-class F1\n","    :param confusion_mat: The confusion matrix, indexed as [gold_label, pred_label]\n","    :param gold_label_indexer: The Indexer for the labels as a List, not an Indexer\n","    \"\"\"\n","    for row in confusion_mat:\n","        print(\"\\t\".join([repr(item) for item in row]))\n","    correct_preds = sum([confusion_mat[i][i] for i in range(0, len(gold_label_indexer))])\n","    total_preds = sum([confusion_mat[i][j] for i in range(0, len(gold_label_indexer)) for j in range(0, len(gold_label_indexer))])\n","    print(\"Accuracy: \" + repr(correct_preds) + \"/\" + repr(total_preds) + \" = \" + repr(correct_preds/total_preds))\n","    for idx in range(0, len(gold_label_indexer)):\n","        num_correct = confusion_mat[idx][idx]\n","        num_gold = sum([confusion_mat[idx][i] for i in range(0, len(gold_label_indexer))])\n","        num_pred = sum([confusion_mat[i][idx] for i in range(0, len(gold_label_indexer))])\n","        rec = num_correct / num_gold\n","        if num_pred > 0:\n","            prec = num_correct / num_pred\n","            f1 = 2 * prec * rec/(prec + rec)\n","        else:\n","            prec = \"undefined\"\n","            f1 = \"undefined\"\n","        print(\"Prec for \" + gold_label_indexer[idx] + \": \" + repr(num_correct) + \"/\" + repr(num_pred) + \" = \" + repr(prec))\n","        print(\"Rec for \" + gold_label_indexer[idx] + \": \" + repr(num_correct) + \"/\" + repr(num_gold) + \" = \" + repr(rec))\n","        print(\"F1 for \" + gold_label_indexer[idx] + \": \" + repr(f1))\n","\n","\n","if __name__==\"__main__\":\n","    args = _parse_args()\n","    print(args)\n","\n","    fact_to_passage_dict = read_passages(args.passages_path)\n","\n","    examples = read_fact_examples(args.labels_path, fact_to_passage_dict)\n","    print(\"Read \" + repr(len(examples)) + \" examples\")\n","    print(\"Fact and length of passages for each fact:\")\n","    for example in examples:\n","        print(example.fact + \": \" + repr([len(p[\"text\"]) for p in example.passages]))\n","\n","    assert args.mode in ['random', 'always_entail', 'word_overlap', 'parsing', 'entailment'], \"invalid method\"\n","    print(f\"Method: {args.mode}\")\n","\n","    fact_checker = None\n","    if args.mode == \"random\":\n","        fact_checker = RandomGuessFactChecker()\n","    elif args.mode == \"always_entail\":\n","        fact_checker = AlwaysEntailedFactChecker()\n","    elif args.mode == \"word_overlap\":\n","        fact_checker = WordRecallThresholdFactChecker()\n","    elif args.mode == \"parsing\":\n","        fact_checker = DependencyRecallThresholdFactChecker()\n","    elif args.mode == \"entailment\":\n","        model_name = \"MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli\"\n","        # model_name = \"roberta-large-mnli\"   # alternative model that you can try out if you want\n","        ent_tokenizer = AutoTokenizer.from_pretrained(model_name)\n","        roberta_ent_model = AutoModelForSequenceClassification.from_pretrained(model_name)\n","        if args.cuda:\n","            roberta_ent_model.to('cuda')\n","        ent_model = EntailmentModel(roberta_ent_model, ent_tokenizer, args.cuda)\n","        fact_checker = EntailmentFactChecker(ent_model)\n","    else:\n","        raise NotImplementedError\n","\n","    predict_two_classes(examples, fact_checker)"]}]}
+# factscore_retrieval_interface.py
+
+import json
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import List, Dict
+from tqdm import tqdm
+import argparse
+from factcheck import *
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, required=True, help="choose from [random', 'always_entail', 'word_overlap', 'parsing', 'entailment]")
+    # parser.add_argument('--labels_path', type=str, default="data/labeled_ChatGPT.jsonl", help="path to the labels")
+    parser.add_argument('--labels_path', type=str, default="data/dev_labeled_ChatGPT.jsonl", help="path to the labels")
+    parser.add_argument('--passages_path', type=str, default="data/passages_bm25_ChatGPT_humfacts.jsonl", help="path to the passages retrieved for the ChatGPT human-labeled facts")
+    parser.add_argument('--cuda', dest='cuda', default=False, action='store_true', help='skip printing output on the test set')
+    args = parser.parse_args()
+    return args
+
+
+def read_passages(path: str):
+    """
+    Reads the retrieved passages and puts then in a dictionary mapping facts to passages.
+    :param path: path to the cached passages
+    :return: dict mapping facts (strings) to passages
+    """
+    fact_to_passage_dict = {}
+    with open(path, 'r') as file:
+        all_lines = file.readlines()
+        for nextline in all_lines:
+            dict = json.loads(nextline)
+            name = dict["name"]
+            for passage in dict["passages"]:
+                if passage["title"] != name:
+                    raise Exception("Couldn't find a match for: " + name + " " + passage["title"])
+            fact_to_passage_dict[dict["sent"]] = dict["passages"]
+    return fact_to_passage_dict
+
+
+def read_fact_examples(labeled_facts_path: str, fact_to_passage_dict: Dict):
+    """
+    Reads the labeled fact examples and constructs FactExample objects associating labeled, human-annotated facts
+    with their corresponding passages
+    :param labeled_facts_path: path to the list of labeled
+    :param fact_to_passage_dict: the dict mapping facts to passages (see load_passages)
+    :return: a list of FactExample objects to use as our dataset
+    """
+    examples = []
+    with open(labeled_facts_path, 'r') as file:
+        all_lines = file.readlines()
+        for nextline in all_lines:
+            dict = json.loads(nextline)
+            if dict["annotations"] is not None:
+                for sent in dict["annotations"]:
+                    if sent["human-atomic-facts"] is None:
+                        # Should never be the case, but just in case
+                        print("No facts! Skipping this one: " + repr(sent))
+                    else:
+                        for fact in sent["human-atomic-facts"]:
+                            if fact["text"] not in fact_to_passage_dict:
+                                # Should never be the case, but just in case
+                                print("Missing fact: " + fact["text"])
+                            else:
+                                examples.append(FactExample(fact["text"], fact_to_passage_dict[fact["text"]], fact["label"]))
+    return examples
+
+
+def predict_two_classes(examples: List[FactExample], fact_checker):
+    """
+    Compares against ground truth which is just the labels S and NS (IR is mapped to NS).
+    Makes predictions and prints evaluation statistics on this setting.
+    :param examples: a list of FactExample objects
+    :param fact_checker: the FactChecker object to use for prediction
+    """
+    gold_label_indexer = ["S", "NS"]
+    confusion_mat = [[0, 0], [0, 0]]
+    ex_count = 0
+
+    for i, example in enumerate(tqdm(examples)):
+        converted_label = "NS" if example.label == 'IR' else example.label
+        gold_label = gold_label_indexer.index(converted_label)
+
+        raw_pred = fact_checker.predict(example.fact, example.passages)
+        pred_label = gold_label_indexer.index(raw_pred)
+
+        confusion_mat[gold_label][pred_label] += 1
+        ex_count += 1
+    print_eval_stats(confusion_mat, gold_label_indexer)
+
+
+def print_eval_stats(confusion_mat, gold_label_indexer):
+    """
+    Takes a confusion matrix and the label indexer and prints accuracy and per-class F1
+    :param confusion_mat: The confusion matrix, indexed as [gold_label, pred_label]
+    :param gold_label_indexer: The Indexer for the labels as a List, not an Indexer
+    """
+    for row in confusion_mat:
+        print("\t".join([repr(item) for item in row]))
+    correct_preds = sum([confusion_mat[i][i] for i in range(0, len(gold_label_indexer))])
+    total_preds = sum([confusion_mat[i][j] for i in range(0, len(gold_label_indexer)) for j in range(0, len(gold_label_indexer))])
+    print("Accuracy: " + repr(correct_preds) + "/" + repr(total_preds) + " = " + repr(correct_preds/total_preds))
+    for idx in range(0, len(gold_label_indexer)):
+        num_correct = confusion_mat[idx][idx]
+        num_gold = sum([confusion_mat[idx][i] for i in range(0, len(gold_label_indexer))])
+        num_pred = sum([confusion_mat[i][idx] for i in range(0, len(gold_label_indexer))])
+        rec = num_correct / num_gold
+        if num_pred > 0:
+            prec = num_correct / num_pred
+            f1 = 2 * prec * rec/(prec + rec)
+        else:
+            prec = "undefined"
+            f1 = "undefined"
+        print("Prec for " + gold_label_indexer[idx] + ": " + repr(num_correct) + "/" + repr(num_pred) + " = " + repr(prec))
+        print("Rec for " + gold_label_indexer[idx] + ": " + repr(num_correct) + "/" + repr(num_gold) + " = " + repr(rec))
+        print("F1 for " + gold_label_indexer[idx] + ": " + repr(f1))
+
+
+if __name__=="__main__":
+    args = _parse_args()
+    print(args)
+
+    fact_to_passage_dict = read_passages(args.passages_path)
+
+    examples = read_fact_examples(args.labels_path, fact_to_passage_dict)
+    print("Read " + repr(len(examples)) + " examples")
+    print("Fact and length of passages for each fact:")
+    for example in examples:
+        print(example.fact + ": " + repr([len(p["text"]) for p in example.passages]))
+
+    assert args.mode in ['random', 'always_entail', 'word_overlap', 'parsing', 'entailment'], "invalid method"
+    print(f"Method: {args.mode}")
+
+    fact_checker = None
+    if args.mode == "random":
+        fact_checker = RandomGuessFactChecker()
+    elif args.mode == "always_entail":
+        fact_checker = AlwaysEntailedFactChecker()
+    elif args.mode == "word_overlap":
+        fact_checker = WordRecallThresholdFactChecker()
+    elif args.mode == "parsing":
+        fact_checker = DependencyRecallThresholdFactChecker()
+    elif args.mode == "entailment":
+        model_name = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+        # model_name = "roberta-large-mnli"   # alternative model that you can try out if you want
+        ent_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        roberta_ent_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        if args.cuda:
+            roberta_ent_model.to('cuda')
+        ent_model = EntailmentModel(roberta_ent_model, ent_tokenizer, args.cuda)
+        fact_checker = EntailmentFactChecker(ent_model)
+    else:
+        raise NotImplementedError
+
+    predict_two_classes(examples, fact_checker)
