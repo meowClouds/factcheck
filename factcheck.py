@@ -5,6 +5,10 @@ from typing import List
 import numpy as np
 import spacy
 import gc
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer, WordNetLemmatizer
 
 
 class FactExample(object):
@@ -82,8 +86,59 @@ class AlwaysEntailedFactChecker(FactChecker):
 
 
 class WordRecallThresholdFactChecker(FactChecker):
+    def __init__(self, threshold=0.6):
+        self.threshold = threshold
+        # Change mode here to test each step:
+        # "baseline"      -> No stop-word removal, no stemming/lemmatization
+        # "stopword"      -> Test 1: Stop-word removal added
+        # "stemming"      -> Test 2: Stop-word removal + Porter Stemming
+        # "lemmatization" -> Test 3: Stop-word removal + Lemmatization
+        self.mode = "baseline"
+
+        self.stemmer = PorterStemmer()
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+
+    def tokenize(self, text: str) -> List[str]:
+        # Basic tokenization and lowercasing
+        return re.findall(r'\w+', text.lower())
+
+    def process_tokens(self, tokens: List[str]) -> List[str]:
+        processed = []
+        for token in tokens:
+            # Test 1, 2, 3: Stop-word removal
+            if self.mode in ["stopword", "stemming", "lemmatization"] and token in self.stop_words:
+                continue
+
+            # Test 2: Porter Stemming
+            if self.mode == "stemming":
+                token = self.stemmer.stem(token)
+
+            # Test 3: Lemmatization instead of Stemming
+            elif self.mode == "lemmatization":
+                token = self.lemmatizer.lemmatize(token)
+
+            processed.append(token)
+        return processed
+
     def predict(self, fact: str, passages: List[dict]) -> str:
-        raise Exception("Implement me")
+        # Combine all passage text into a single string
+        passage_text = " ".join([p.get("text", "") for p in passages])
+
+        fact_tokens = self.tokenize(fact)
+        passage_tokens = self.tokenize(passage_text)
+
+        processed_fact = self.process_tokens(fact_tokens)
+        processed_passage_set = set(self.process_tokens(passage_tokens))
+
+        if not processed_fact:
+            return "NS"
+
+        # Calculate word recall: fraction of processed fact tokens present in the passages
+        matches = sum(1 for token in processed_fact if token in processed_passage_set)
+        recall = matches / len(processed_fact)
+
+        return "S" if recall >= self.threshold else "NS"
 
 
 class EntailmentFactChecker(FactChecker):
