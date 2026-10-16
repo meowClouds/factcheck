@@ -1,1 +1,126 @@
-{"nbformat":4,"nbformat_minor":0,"metadata":{"colab":{"provenance":[],"authorship_tag":"ABX9TyNBd/sAtWS5W+9j6foSQaNy"},"kernelspec":{"name":"python3","display_name":"Python 3"},"language_info":{"name":"python"}},"cells":[{"cell_type":"code","execution_count":null,"metadata":{"id":"DNveEHYFrtDe"},"outputs":[],"source":["# factcheck.py\n","\n","import torch\n","from typing import List\n","import numpy as np\n","import spacy\n","import gc\n","\n","\n","class FactExample(object):\n","    \"\"\"\n","    :param fact: A string representing the fact to make a prediction on\n","    :param passages: List[dict], where each dict has keys \"title\" and \"text\". \"title\" denotes the title of the\n","    Wikipedia page it was taken from; you generally don't need to use this. \"text\" is a chunk of text, which may or\n","    may not align with sensible paragraph or sentence boundaries\n","    :param label: S, NS, or IR for Supported, Not Supported, or Irrelevant. Note that we will ignore the Irrelevant\n","    label for prediction, so your model should just predict S or NS, but we leave it here so you can look at the\n","    raw data.\n","    \"\"\"\n","    def __init__(self, fact: str, passages: List[dict], label: str):\n","        self.fact = fact\n","        self.passages = passages\n","        self.label = label\n","\n","    def __repr__(self):\n","        return repr(\"fact=\" + repr(self.fact) + \"; label=\" + repr(self.label) + \"; passages=\" + repr(self.passages))\n","\n","\n","class EntailmentModel(object):\n","    def __init__(self, model, tokenizer, cuda=False):\n","        self.model = model\n","        self.tokenizer = tokenizer\n","        self.cuda = cuda\n","\n","    def check_entailment(self, premise: str, hypothesis: str):\n","        with torch.no_grad():\n","            # Tokenize the premise and hypothesis\n","            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)\n","            if self.cuda:\n","                inputs = {key: value.to('cuda') for key, value in inputs.items()}\n","            # Get the model's prediction\n","            outputs = self.model(**inputs)\n","            logits = outputs.logits\n","\n","        # Note that the labels are [\"entailment\", \"neutral\", \"contradiction\"]. There are a number of ways to map\n","        # these logits or probabilities to classification decisions; you'll have to decide how you want to do this.\n","\n","        raise Exception(\"Not implemented\")\n","\n","        # To prevent out-of-memory (OOM) issues during autograding, we explicitly delete\n","        # objects inputs, outputs, logits, and any results that are no longer needed after the computation.\n","        del inputs, outputs, logits\n","        gc.collect()\n","\n","        # return something\n","\n","\n","class FactChecker(object):\n","    \"\"\"\n","    Fact checker base type\n","    \"\"\"\n","\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        \"\"\"\n","        Makes a prediction on the given sentence\n","        :param fact: same as FactExample\n","        :param passages: same as FactExample\n","        :return: \"S\" (supported) or \"NS\" (not supported)\n","        \"\"\"\n","        raise Exception(\"Don't call me, call my subclasses\")\n","\n","\n","class RandomGuessFactChecker(FactChecker):\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        prediction = np.random.choice([\"S\", \"NS\"])\n","        return prediction\n","\n","\n","class AlwaysEntailedFactChecker(FactChecker):\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        return \"S\"\n","\n","\n","class WordRecallThresholdFactChecker(FactChecker):\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        raise Exception(\"Implement me\")\n","\n","\n","class EntailmentFactChecker(FactChecker):\n","    def __init__(self, ent_model):\n","        self.ent_model = ent_model\n","\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        raise Exception(\"Implement me\")\n","\n","\n","# OPTIONAL\n","class DependencyRecallThresholdFactChecker(FactChecker):\n","    def __init__(self):\n","        self.nlp = spacy.load('en_core_web_sm')\n","\n","    def predict(self, fact: str, passages: List[dict]) -> str:\n","        raise Exception(\"Implement me\")\n","\n","    def get_dependencies(self, sent: str):\n","        \"\"\"\n","        Returns a set of relevant dependencies from sent\n","        :param sent: The sentence to extract dependencies from\n","        :param nlp: The spaCy model to run\n","        :return: A set of dependency relations as tuples (head, label, child) where the head and child are lemmatized\n","        if they are verbs. This is filtered from the entire set of dependencies to reflect ones that are most\n","        semantically meaningful for this kind of fact-checking\n","        \"\"\"\n","        # Runs the spaCy tagger\n","        processed_sent = self.nlp(sent)\n","        relations = set()\n","        for token in processed_sent:\n","            ignore_dep = ['punct', 'ROOT', 'root', 'det', 'case', 'aux', 'auxpass', 'dep', 'cop', 'mark']\n","            if token.is_punct or token.dep_ in ignore_dep:\n","                continue\n","            # Simplify the relation to its basic form (root verb form for verbs)\n","            head = token.head.lemma_ if token.head.pos_ == 'VERB' else token.head.text\n","            dependent = token.lemma_ if token.pos_ == 'VERB' else token.text\n","            relation = (head, token.dep_, dependent)\n","            relations.add(relation)\n","        return relations\n"]}]}
+# factcheck.py
+
+import torch
+from typing import List
+import numpy as np
+import spacy
+import gc
+
+
+class FactExample(object):
+    """
+    :param fact: A string representing the fact to make a prediction on
+    :param passages: List[dict], where each dict has keys "title" and "text". "title" denotes the title of the
+    Wikipedia page it was taken from; you generally don't need to use this. "text" is a chunk of text, which may or
+    may not align with sensible paragraph or sentence boundaries
+    :param label: S, NS, or IR for Supported, Not Supported, or Irrelevant. Note that we will ignore the Irrelevant
+    label for prediction, so your model should just predict S or NS, but we leave it here so you can look at the
+    raw data.
+    """
+    def __init__(self, fact: str, passages: List[dict], label: str):
+        self.fact = fact
+        self.passages = passages
+        self.label = label
+
+    def __repr__(self):
+        return repr("fact=" + repr(self.fact) + "; label=" + repr(self.label) + "; passages=" + repr(self.passages))
+
+
+class EntailmentModel(object):
+    def __init__(self, model, tokenizer, cuda=False):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.cuda = cuda
+
+    def check_entailment(self, premise: str, hypothesis: str):
+        with torch.no_grad():
+            # Tokenize the premise and hypothesis
+            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
+            if self.cuda:
+                inputs = {key: value.to('cuda') for key, value in inputs.items()}
+            # Get the model's prediction
+            outputs = self.model(**inputs)
+            logits = outputs.logits
+
+        # Note that the labels are ["entailment", "neutral", "contradiction"]. There are a number of ways to map
+        # these logits or probabilities to classification decisions; you'll have to decide how you want to do this.
+
+        raise Exception("Not implemented")
+
+        # To prevent out-of-memory (OOM) issues during autograding, we explicitly delete
+        # objects inputs, outputs, logits, and any results that are no longer needed after the computation.
+        del inputs, outputs, logits
+        gc.collect()
+
+        # return something
+
+
+class FactChecker(object):
+    """
+    Fact checker base type
+    """
+
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        """
+        Makes a prediction on the given sentence
+        :param fact: same as FactExample
+        :param passages: same as FactExample
+        :return: "S" (supported) or "NS" (not supported)
+        """
+        raise Exception("Don't call me, call my subclasses")
+
+
+class RandomGuessFactChecker(FactChecker):
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        prediction = np.random.choice(["S", "NS"])
+        return prediction
+
+
+class AlwaysEntailedFactChecker(FactChecker):
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        return "S"
+
+
+class WordRecallThresholdFactChecker(FactChecker):
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        raise Exception("Implement me")
+
+
+class EntailmentFactChecker(FactChecker):
+    def __init__(self, ent_model):
+        self.ent_model = ent_model
+
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        raise Exception("Implement me")
+
+
+# OPTIONAL
+class DependencyRecallThresholdFactChecker(FactChecker):
+    def __init__(self):
+        self.nlp = spacy.load('en_core_web_sm')
+
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        raise Exception("Implement me")
+
+    def get_dependencies(self, sent: str):
+        """
+        Returns a set of relevant dependencies from sent
+        :param sent: The sentence to extract dependencies from
+        :param nlp: The spaCy model to run
+        :return: A set of dependency relations as tuples (head, label, child) where the head and child are lemmatized
+        if they are verbs. This is filtered from the entire set of dependencies to reflect ones that are most
+        semantically meaningful for this kind of fact-checking
+        """
+        # Runs the spaCy tagger
+        processed_sent = self.nlp(sent)
+        relations = set()
+        for token in processed_sent:
+            ignore_dep = ['punct', 'ROOT', 'root', 'det', 'case', 'aux', 'auxpass', 'dep', 'cop', 'mark']
+            if token.is_punct or token.dep_ in ignore_dep:
+                continue
+            # Simplify the relation to its basic form (root verb form for verbs)
+            head = token.head.lemma_ if token.head.pos_ == 'VERB' else token.head.text
+            dependent = token.lemma_ if token.pos_ == 'VERB' else token.text
+            relation = (head, token.dep_, dependent)
+            relations.add(relation)
+        return relations
