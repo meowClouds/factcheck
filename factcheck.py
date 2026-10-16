@@ -9,6 +9,8 @@ import re
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer, WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 class FactExample(object):
@@ -129,16 +131,38 @@ class WordRecallThresholdFactChecker(FactChecker):
         passage_tokens = self.tokenize(passage_text)
 
         processed_fact = self.process_tokens(fact_tokens)
-        processed_passage_set = set(self.process_tokens(passage_tokens))
+
+        processed_passage = self.process_tokens(passage_tokens)
+        processed_passage_set = set(processed_passage)
 
         if not processed_fact:
             return "NS"
 
-        # Calculate word recall: fraction of processed fact tokens present in the passages
+        # Metric 1: Word Recall (The original code)
         matches = sum(1 for token in processed_fact if token in processed_passage_set)
-        recall = matches / len(processed_fact)
+        recall_score = matches / len(processed_fact)
 
-        return "S" if recall >= self.threshold else "NS"
+        # Metric 2: Jaccard Similarity
+        fact_set = set(processed_fact)
+        passage_set = set(processed_passage)
+        intersection = len(fact_set.intersection(passage_set))
+        union = len(fact_set.union(passage_set))
+        jaccard_score = intersection / union if union > 0 else 0.0
+
+        # Metric 3: TF-IDF Cosine Similarity
+        fact_str = " ".join(processed_fact)
+        passage_str = " ".join(processed_passage)
+
+        vectorizer = TfidfVectorizer()
+        try:
+            tfidf_matrix = vectorizer.fit_transform([fact_str, passage_str])
+            tfidf_score = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
+        except ValueError:
+            tfidf_score = 0.0
+
+        score = tfidf_score
+
+        return "S" if score >= self.threshold else "NS"
 
 
 class EntailmentFactChecker(FactChecker):
