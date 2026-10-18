@@ -6,11 +6,7 @@ import numpy as np
 import spacy
 import gc
 import re
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer, WordNetLemmatizer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from nltk.stem import PorterStemmer
 
 
 class FactExample(object):
@@ -88,79 +84,36 @@ class AlwaysEntailedFactChecker(FactChecker):
 
 
 class WordRecallThresholdFactChecker(FactChecker):
-    def __init__(self, threshold=0.6):
-        self.threshold = threshold
-        # Change mode here to test each step:
-        # "baseline"      -> No stop-word removal, no stemming/lemmatization
-        # "stopword"      -> Test 1: Stop-word removal added
-        # "stemming"      -> Test 2: Stop-word removal + Porter Stemming
-        # "lemmatization" -> Test 3: Stop-word removal + Lemmatization
-        self.mode = "baseline"
+    """
+    Word-overlap fact checker: predicts "S" when enough of the fact's words appear in the retrieved passages.
 
+    - Metric: plain word recall (fraction of the fact's tokens found in the passages). It matched or beat
+      IDF-weighted recall in 5-fold CV and clearly beat TF-IDF cosine and Jaccard, likely because those
+      penalise the length of the long passages.
+    - Preprocessing: Porter stemming, no stop-word removal. Removing stop words lowered cross-validated
+      accuracy (about 76% vs 81%).
+    - Passages: all passage texts are joined, and the <s> and </s> markers are stripped before tokenizing.
+    - Threshold 0.81 gives about 81% on the dev set. Accuracy is about 80-81% across thresholds 0.775 to 0.825,
+      so the choice is not sensitive. The threshold was tuned on the same 221 examples (no separate test set
+      is available), so treat 81% as slightly optimistic.
+    """
+    def __init__(self, threshold=0.81):
+        self.threshold = threshold
         self.stemmer = PorterStemmer()
-        self.lemmatizer = WordNetLemmatizer()
-        self.stop_words = set(stopwords.words('english'))
 
     def tokenize(self, text: str) -> List[str]:
-        # Basic tokenization and lowercasing
-        return re.findall(r'\w+', text.lower())
-
-    def process_tokens(self, tokens: List[str]) -> List[str]:
-        processed = []
-        for token in tokens:
-            # Test 1, 2, 3: Stop-word removal
-            if self.mode in ["stopword", "stemming", "lemmatization"] and token in self.stop_words:
-                continue
-
-            # Test 2: Porter Stemming
-            if self.mode == "stemming":
-                token = self.stemmer.stem(token)
-
-            # Test 3: Lemmatization instead of Stemming
-            elif self.mode == "lemmatization":
-                token = self.lemmatizer.lemmatize(token)
-
-            processed.append(token)
-        return processed
+        text = text.replace("<s>", " ").replace("</s>", " ")
+        return [self.stemmer.stem(token) for token in re.findall(r"\w+", text.lower())]
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-        # Combine all passage text into a single string
         passage_text = " ".join([p.get("text", "") for p in passages])
+        passage_tokens = set(self.tokenize(passage_text))
 
         fact_tokens = self.tokenize(fact)
-        passage_tokens = self.tokenize(passage_text)
-
-        processed_fact = self.process_tokens(fact_tokens)
-
-        processed_passage = self.process_tokens(passage_tokens)
-        processed_passage_set = set(processed_passage)
-
-        if not processed_fact:
-            return "NS"
-
-        # Metric 1: Word Recall (The original code)
-        matches = sum(1 for token in processed_fact if token in processed_passage_set)
-        recall_score = matches / len(processed_fact)
-
-        # Metric 2: Jaccard Similarity
-        fact_set = set(processed_fact)
-        passage_set = set(processed_passage)
-        intersection = len(fact_set.intersection(passage_set))
-        union = len(fact_set.union(passage_set))
-        jaccard_score = intersection / union if union > 0 else 0.0
-
-        # Metric 3: TF-IDF Cosine Similarity
-        fact_str = " ".join(processed_fact)
-        passage_str = " ".join(processed_passage)
-
-        vectorizer = TfidfVectorizer()
-        try:
-            tfidf_matrix = vectorizer.fit_transform([fact_str, passage_str])
-            tfidf_score = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
-        except ValueError:
-            tfidf_score = 0.0
-
-        score = tfidf_score
+        if not fact_tokens:
+            score = 0.0
+        else:
+            score = sum(1 for token in fact_tokens if token in passage_tokens) / len(fact_tokens)
 
         return "S" if score >= self.threshold else "NS"
 
