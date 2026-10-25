@@ -37,7 +37,7 @@ class EntailmentModel(object):
     def check_entailment(self, premise: str, hypothesis: str):
         with torch.no_grad():
             # Tokenize the premise and hypothesis
-            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
+            inputs = self.tokenizer(premise,hypothesis,return_tensors="pt",truncation=True,max_length=512,padding=True,)
             if self.cuda:
                 inputs = {key: value.to('cuda') for key, value in inputs.items()}
             # Get the model's prediction
@@ -47,15 +47,14 @@ class EntailmentModel(object):
         # Note that the labels are ["entailment", "neutral", "contradiction"]. There are a number of ways to map
         # these logits or probabilities to classification decisions; you'll have to decide how you want to do this.
 
-        raise Exception("Not implemented")
+        probabilities = torch.softmax(logits, dim=-1)[0]
+        entailment_score = probabilities[0].item()
+        predicted_class = torch.argmax(probabilities).item()
 
-        # To prevent out-of-memory (OOM) issues during autograding, we explicitly delete
-        # objects inputs, outputs, logits, and any results that are no longer needed after the computation.
-        del inputs, outputs, logits
+        del inputs, outputs, logits, probabilities
         gc.collect()
 
-        # return something
-
+        return entailment_score, predicted_class
 
 class FactChecker(object):
     """
@@ -123,8 +122,16 @@ class EntailmentFactChecker(FactChecker):
         self.ent_model = ent_model
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-        raise Exception("Implement me")
+       max_entailment_score = 0.0
 
+       for passage in passages:
+          premise = passage["text"]
+          score, _ = self.ent_model.check_entailment(premise, fact)
+          max_entailment_score = max(max_entailment_score, score)
+
+       # Probability threshold decision
+       threshold = 0.20
+       return "S" if max_entailment_score >= threshold else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(FactChecker):
