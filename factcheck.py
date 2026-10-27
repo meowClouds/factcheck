@@ -118,20 +118,57 @@ class WordRecallThresholdFactChecker(FactChecker):
 
 
 class EntailmentFactChecker(FactChecker):
-    def __init__(self, ent_model):
+    """
+    Entailment-based fact checker enhanced with word-overlap pruning 
+    to improve execution speed and out-of-memory (OOM) prevention.
+    """
+    def __init__(self, ent_model, overlap_threshold=0.08):
         self.ent_model = ent_model
+        self.overlap_threshold = overlap_threshold
+        self.stemmer = PorterStemmer()
+
+    def _tokenize(self, text: str) -> set:
+        """Helper to tokenize and stem text for word overlap comparison."""
+        text = text.replace("<s>", " ").replace("</s>", " ")
+        return {self.stemmer.stem(token) for token in re.findall(r"\w+", text.lower())}
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-       max_entailment_score = 0.0
+        max_entailment_score = 0.0
+        fact_tokens = self._tokenize(fact)
 
-       for passage in passages:
-          premise = passage["text"]
-          score, _ = self.ent_model.check_entailment(premise, fact)
-          max_entailment_score = max(max_entailment_score, score)
+        if not fact_tokens:
+            return "NS"
 
-       # Probability threshold decision
-       threshold = 0.20
-       return "S" if max_entailment_score >= threshold else "NS"
+        for passage in passages:
+            passage_text = passage.get("text", "")
+            passage_tokens = self._tokenize(passage_text)
+
+            # 1. Word-Overlap Pruning Step:
+            # Calculate word recall overlap between the fact and the passage.
+            if passage_tokens:
+                overlap_count = sum(1 for token in fact_tokens if token in passage_tokens)
+                word_recall = overlap_count / len(fact_tokens)
+            else:
+                word_recall = 0.0
+
+            # If word overlap is below the threshold, entailment is extremely unlikely.
+            # Skip the heavy transformer forward pass to save time and memory.
+            if word_recall < self.overlap_threshold:
+                continue
+
+            # 2. Run entailment inference only on promising passages
+            score, _ = self.ent_model.check_entailment(passage_text, fact)
+            max_entailment_score = max(max_entailment_score, score)
+
+        # 3. Out-of-Memory (OOM) Prevention:
+        # Clear CUDA cache and run garbage collection after processing each example.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+        # Probability threshold decision (tuned via development set)
+        threshold = 0.20
+        return "S" if max_entailment_score >= threshold else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(FactChecker):
