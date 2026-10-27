@@ -7,6 +7,7 @@ import spacy
 import gc
 import re
 from nltk.stem import PorterStemmer
+from passage_prep import build_premises
 
 
 class FactExample(object):
@@ -133,42 +134,41 @@ class EntailmentFactChecker(FactChecker):
         return {self.stemmer.stem(token) for token in re.findall(r"\w+", text.lower())}
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-        max_entailment_score = 0.0
-        fact_tokens = self._tokenize(fact)
+            max_entailment_score = 0.0
+            fact_tokens = self._tokenize(fact)
 
-        if not fact_tokens:
-            return "NS"
+            if not fact_tokens:
+                return "NS"
 
-        for passage in passages:
-            passage_text = passage.get("text", "")
-            passage_tokens = self._tokenize(passage_text)
+            # Split long passages into 2-sentence windows to prevent transformer truncation
+            premises = build_premises(passages, window=2)
 
-            # 1. Word-Overlap Pruning Step:
-            # Calculate word recall overlap between the fact and the passage.
-            if passage_tokens:
-                overlap_count = sum(1 for token in fact_tokens if token in passage_tokens)
-                word_recall = overlap_count / len(fact_tokens)
-            else:
-                word_recall = 0.0
+            for premise_text, _ in premises:
+                premise_tokens = self._tokenize(premise_text)
 
-            # If word overlap is below the threshold, entailment is extremely unlikely.
-            # Skip the heavy transformer forward pass to save time and memory.
-            if word_recall < self.overlap_threshold:
-                continue
+                # 1. Word-Overlap Pruning Step:
+                if premise_tokens:
+                    overlap_count = sum(1 for token in fact_tokens if token in premise_tokens)
+                    word_recall = overlap_count / len(fact_tokens)
+                else:
+                    word_recall = 0.0
 
-            # 2. Run entailment inference only on promising passages
-            score, _ = self.ent_model.check_entailment(passage_text, fact)
-            max_entailment_score = max(max_entailment_score, score)
+                # Skip the heavy transformer forward pass if word overlap is too low
+                if word_recall < self.overlap_threshold:
+                    continue
 
-        # 3. Out-of-Memory (OOM) Prevention:
-        # Clear CUDA cache and run garbage collection after processing each example.
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+                # 2. Run entailment inference on the clean, short premise
+                score, _ = self.ent_model.check_entailment(premise_text, fact)
+                max_entailment_score = max(max_entailment_score, score)
 
-        # Probability threshold decision (tuned via development set)
-        threshold = 0.20
-        return "S" if max_entailment_score >= threshold else "NS"
+            # 3. Out-of-Memory (OOM) Prevention
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+            # With clean sentence windows, true entailment scores are much higher.
+            threshold = 0.43
+            return "S" if max_entailment_score >= threshold else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(FactChecker):

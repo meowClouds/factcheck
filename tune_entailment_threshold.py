@@ -1,7 +1,10 @@
-
 import argparse
 import json
 import os
+import re
+import gc
+from nltk.stem import PorterStemmer
+from passage_prep import build_premises
 
 import torch
 from tqdm import tqdm
@@ -56,29 +59,56 @@ def calculate_scores(use_cuda):
     ent_model = EntailmentModel(model, tokenizer, use_cuda)
 
     scores = []
+    stemmer = PorterStemmer()
+
+    def _tokenize(text: str) -> set:
+        text = text.replace("<s>", " ").replace("</s>", " ")
+        return {stemmer.stem(token) for token in re.findall(r"\w+", text.lower())}
 
     for example in tqdm(examples, desc="Scoring facts"):
         max_score = 0.0
         any_entailment = False
+        fact_tokens = _tokenize(example.fact)
 
-        for passage in example.passages:
-            score, predicted_class = ent_model.check_entailment(
-                passage["text"], example.fact
-            )
+        if fact_tokens:
+            # Chunk into sentence windows just like factcheck.py
+            premises = build_premises(example.passages, window=2)
 
-            max_score = max(max_score, score)
+            for premise_text, _ in premises:
+                premise_tokens = _tokenize(premise_text)
 
-            if predicted_class == 0:
-                any_entailment = True
+                # Word overlap pruning
+                if premise_tokens:
+                    overlap_count = sum(1 for token in fact_tokens if token in premise_tokens)
+                    word_recall = overlap_count / len(fact_tokens)
+                else:
+                    word_recall = 0.0
+
+                if word_recall < 0.08:
+                    continue
+
+                # Run entailment
+                score, predicted_class = ent_model.check_entailment(
+                    premise_text, example.fact
+                )
+
+                max_score = max(max_score, score)
+
+                if predicted_class == 0:
+                    any_entailment = True
 
         gold_label = "NS" if example.label == "IR" else example.label
 
         scores.append({
             "fact": example.fact,
             "gold_label": gold_label,
-            "max_entailment_score": max_score,
+            "max_entailment_score": float(max_score),
             "discrete_prediction": "S" if any_entailment else "NS",
         })
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
     save_scores(scores)
     print(f"Saved scores to {SCORES_PATH}")
